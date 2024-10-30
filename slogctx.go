@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"go/ast"
 	"slices"
-	"strings"
 
+	"github.com/kr/pretty"
 	"golang.org/x/tools/go/analysis"
 	"golang.org/x/tools/go/analysis/passes/inspect"
 	"golang.org/x/tools/go/ast/inspector"
@@ -33,48 +33,56 @@ func init() {
 // Analyzer のエントリーポイント。パッケージごとに呼び出される。
 // testdata ディレクトリ配下のファイルは無視される。
 func run(pass *analysis.Pass) (any, error) {
-	for _, file := range pass.Files {
-		currentFilePath := pass.Fset.File(file.Pos()).Name()
-		fmt.Println("👺 currentFilePath", currentFilePath)
+	// FIXME: 調査対象のファイルを絞れるようにしたい
+	// FIXME: nolint で ignore できるようにしたい
 
-		// log/slog または golang.org/x/exp/slog が import されているかどうかを確認する
-		hasSlogImport := slices.ContainsFunc(file.Imports, func(item *ast.ImportSpec) bool {
-			path := strings.Trim(item.Path.Value, "\"")
-			return path == "log/slog" || path == "golang.org/x/exp/slog"
-		})
-
-		// slog が import されていない場合はスキップ
-		if !hasSlogImport {
-			continue
-		}
-
-		// slog が import されている場合は slog が使われている箇所を検証する
-		// メソッド、または関数となっている Debug, Info, Warn, Error, Log が呼ばれているかどうかを確認する
-		inspectorImpl := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
-		nodeFilter := []ast.Node{
-			// TODO FOR NEXT TIME
-			// ここに走査対象のノードを追加する
-			// https://chatgpt.com/c/67202f0b-eee8-8000-a925-7fc64e2aab7e
-			(*ast.FuncDecl)(nil),
-			(*ast.CallExpr)(nil),
-			(*ast.ValueSpec)(nil),
-		}
-		inspectorImpl.Preorder(nodeFilter, func(n ast.Node) {
-			fmt.Printf("👺 n: %T\n", n)
-			switch x := n.(type) {
-			case *ast.CallExpr:
-				if x.Fun == nil {
-					return
-				}
-				ident, ok := x.Fun.(*ast.Ident)
-				if !ok {
-					return
-				}
-				fmt.Println("👺 ident.Name", ident.Name)
-			}
-		})
-
+	// メソッド、または関数となっている Debug, Info, Warn, Error, Log が呼ばれているかどうかを確認する
+	inspectorImpl := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
+	nodeFilter := []ast.Node{
+		(*ast.CallExpr)(nil),
 	}
+
+	bannedIdentifiers := []string{"Debug", "Info", "Warn", "Error", "Log"}
+	inspectorImpl.Preorder(nodeFilter, func(n ast.Node) {
+		switch x := n.(type) {
+		// NOTE: 関数やメソッドの呼び出しが Call Expression (ast.CallExpr)
+		case *ast.CallExpr:
+			// NOTE: `slog.Debug()` や `http.DefaultClient.Do()` など、`.` で繋がった式が Selector Expression (ast.SelectorExpr)
+			// `.` の左側にはパッケージや何かしらの値 (変数、定数、構造体のフィールド etc.) が来る
+			// 右側には何かしらの値、または関数・メソッドの呼び出しが来る。
+			// ここでは x が CallExpr なので、x.Fun が SelectorExpr であるかどうかを確認する
+			funExpr, ok := x.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return
+			}
+
+			selectorExpr, ok := funExpr.X.(*ast.Ident)
+			if !ok {
+				return
+			}
+
+			// FIXME: import name を変えられていた場合を考慮できてない
+			if selectorExpr.Name == "slog" && slices.Contains(bannedIdentifiers, funExpr.Sel.Name) {
+				// slog が使われている箇所を検証する
+				pass.Reportf(x.Pos(), "slog.%s が呼ばれています", funExpr.Sel.Name)
+			}
+
+			// TODO FOR NEXT TIME
+
+			if selectorExpr.Obj != nil {
+				pretty.Println("🏀 selectorExpr.Obj.Decl", selectorExpr.Obj.Decl)
+				objDeclAssignStmt, ok := selectorExpr.Obj.Decl.(*ast.AssignStmt)
+				if !ok {
+					fmt.Printf("👺 %T は ast.AssignStmt ではないためスキップします\n", selectorExpr)
+					return
+				}
+
+				pretty.Println("🏀 objDeclAssignStmt", objDeclAssignStmt)
+			}
+			return
+		}
+	})
+
 	// inspect := pass.ResultOf[inspect.Analyzer].(*inspector.Inspector)
 
 	return nil, nil
