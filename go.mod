@@ -5,7 +5,6 @@ go 1.23
 require (
 	github.com/gostaticanalysis/testutil v0.4.0
 	github.com/kr/pretty v0.3.1
-	github.com/samber/lo v1.47.0
 	golang.org/x/tools v0.26.0
 )
 
